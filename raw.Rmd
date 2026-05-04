@@ -1,0 +1,110 @@
+---
+title: "raw"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(grid)
+library(MASS)
+library(car)
+library(e1071)
+library(sf)
+library(ggmap)
+library(scales)
+library(RColorBrewer)
+library(tmap)
+library(rgeoda)
+library(spdep)
+library(spData)
+library(robustHD)
+library(sfdep)
+library(spatialreg)
+library(stats)
+```
+
+## Non-Spatial vs. Spatial Comparison
+
+Using $x:$ `AirpVote` and $y:$ `BioVote`, we will perform a simple regression:
+
+```{r}
+non.spatial.mdl <- lm(BioVote~AirpVote, data = KT_ZH)
+summary(non.spatial.mdl)
+
+AIC(non.spatial.mdl)
+```
+
+#### Coefficients
+
+The intercept of the non-spatial linear regression is $23.8$, and the slope is $0.1368$. The p-value of the `AirpVote` predictor variable is very small ($0.00218$), so we reject $H_0$ that the `BioVote` referendum is not dependent on the `AirpVote` referendum. The (slightly) positive slope value $0.1368$ indicates a positive relationship between the two referenda. For every 1 percentage point increase in favor of `AirpVote`, `BioVote` support increase by $~0.14$ percentage points. This is statistically significant ($p=0.00219<0.05$).
+
+#### Adjusted R-Squared
+
+The adjusted $R^2$ value of $0.05128$ suggests that only \~5% of the variation in `BioVote` values can be explained by the linear regression model, leaving a *very* large portion of the variance unexplained (around 95%). This tells us that the model fit is very weak, even though the relationship is significant.
+
+#### F-Statistic
+
+The degrees of freedom (1 and 160) reflect that we have 1 predictor variable and $162 - 1 - 1 = 160$ observations remaining to estimate the residual variance. Finding an F value at least as large as $9.702$ under the null hypothesis of the F-test ($H_0: R^2=0$) is highly unlikely with $p=0.002182<0.05$. Therefore we reject the null hypothesis, meaning that the model explains a significant proportion of the `BioVote` variance.
+
+The two referenda seem like they should attract opposite voters, since one is pro-airport expansion (arguably not environment-friendly), and the other is pro-environmental protection. So, we'd expect places that voted "yes" on the airport to vote "no" on biodiversity, giving a **negative** relationship. Instead, the model finds a **positive** one, which is counterintuitive and therefore surprising.
+
+### Moran Map - Non-Spatial Simple Regr
+
+```{r}
+Loc.Moran.Results.lm <- rgeoda::local_moran(queen_w, as.data.frame(resid(non.spatial.mdl)))
+
+lisa_colors_lm <- lisa_colors(Loc.Moran.Results.lm)
+lisa_labels_lm <- lisa_labels(Loc.Moran.Results.lm)
+lisa_clusters_lm <- lisa_clusters(Loc.Moran.Results.lm)
+
+plot(st_geometry(KT_ZH), 
+     col=sapply(lisa_clusters_lm, function(x){return(lisa_colors_lm[[x+1]])}), 
+     border = "#333333", lwd=0.2)
+title(main = "Local Moran Map of AirpVote and BioVote Referenda - Non-Spatial Model")
+legend('bottomleft', legend = lisa_labels_lm, fill = lisa_colors_lm, border = "#eeeeee")
+```
+
+The residuals of the non-spatial model show 2 clear spatial clustering. Municipalities in the southwest (around Uetliberg, City) are systemically underestimated (high-high), whilst those in the north are systematically overestimated (low-low). There are few municipalities that show negative spatial autocorrelation.
+
+**High-High**: these municipalities have high residuals *themselves*, and so do their neighboring municipalities, which indicates that the non-spatial model does not predict `BioVote` patterns well. Vice versa for Low-Low municipalities. This means residuals in neighboring municipalities are *not* independent, which violates the assumption of standard linear regression and showing us that a spatial model is needed.
+
+### Moran's Map - Spatial Simple Regr (Spatial Lag)
+
+```{r}
+fit.lag.model <- lagsarlm(BioVote~AirpVote, data = KT_ZH, listw = WEIGHT_MATRIX_KT_ZH) 
+summary(fit.lag.model)
+```
+
+#### Spatial Autocorrelation Coefficient ($\rho$)
+
+Our fitted $\rho$ has a value of $0.49085$, which is moderate. It yields a z-score of $5.69$, and observing a z-value at least as extreme under $H_0: \rho=0$, is $p=1.2439e-08<0.05$, meaning we reject the null hypothesis. Since our $\rho$ is significant, this means that neighboring municipalities' `BioVote` results *do* meaningfully influence each other. This confirms spatial structure exists in the data.
+
+#### Regression Coefficient
+
+Compared to our non-spatial simple regression ($b=0.1368$), the spatial model's `AirpVote` is now closer to zero with $0.0507$. With a p-value of $0.1993>0.05$, we fail to reject the null hypothesis ($H_0: b=0$), meaning that the voting results of the `AirpVote` do not predict the results for the `BioVote`.
+
+Unlike the non-spatial model, `AirpVote` is no longer significant in this model. This suggests that the relationship we saw in 3a was probably a results of spatial autocorrelation rather than a true predictive relationship between the two referenda.
+
+#### AIC
+
+The AIC for the spatial lag model is $1030.2$, which constitutes a better fit to the data than the non-spatial model, for which we found AIC $=1054.3$. We can further assess the fit of the spatial lag model by examining the spatial pattern in model residuals. 
+
+```{r}
+Loc.Moran.Results.lagsarlm <- rgeoda::local_moran(queen_w, as.data.frame(resid(fit.lag.model)))
+
+lisa_colors_lagsarlm <- lisa_colors(Loc.Moran.Results.lagsarlm)
+lisa_labels_lagsarlm <- lisa_labels(Loc.Moran.Results.lagsarlm)
+lisa_clusters_lagsarlm <- lisa_clusters(Loc.Moran.Results.lagsarlm)
+
+plot(st_geometry(KT_ZH), 
+     col=sapply(lisa_clusters_lagsarlm, function(x){return(lisa_colors_lagsarlm[[x+1]])}), 
+     border = "#333333", lwd=0.2)
+title(main = "Local Moran Map of AirpVote and BioVote Referenda - Spatial Model")
+legend('bottomleft', legend = lisa_labels_lagsarlm, fill = lisa_colors_lagsarlm, border = "#eeeeee")
+```
+
+It looks like the residuals definitely improved in comparison with the non-spatial linear regression, since the clusters from the non-spatial have been broken down into smaller, more dispersed patches, suggesting that the spatial model is more reliable in predicting `BioVote` results from the `AirpVote` referendum.
+
+However, we do still notice small High-High clusters around Zurich City, and that these are paired with Low-High municipalities, which have low residuals themselves but high residuals from their neighbors. This suggests that a few individual municipalities are still not well predicted by the model, possibly due to local urban factors not captured by either referendum variable (e.g. different voting behaviors of people living in the city but registered and voting outside). In other words, the distribution of the residuals suggests that observations from neighboring municipalities may actually be dependent on other social or urban factors.
